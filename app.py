@@ -18,33 +18,12 @@ OVH_CONSUMER_KEY = os.environ.get('OVH_CONSUMER_KEY')
 USER_IPS = {}
 for key, value in os.environ.items():
     if key.startswith('USER_'):
+        # Convert USER_yatateraca_gmail.com back to yatateraca@gmail.com
         email = key.replace('USER_', '').replace('_', '@')
         ips = value.split(',')
         USER_IPS[email] = [ip.strip() for ip in ips]
 
-# Simple in-memory rate limiting (per IP)
-rate_limit_store = {}
-
-def rate_limit(limit=100, window=3600):  # 100 requests per hour
-    def decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            client_ip = request.remote_addr
-            now = datetime.now().timestamp()
-            
-            if client_ip not in rate_limit_store:
-                rate_limit_store[client_ip] = []
-            
-            # Clean old requests
-            rate_limit_store[client_ip] = [t for t in rate_limit_store[client_ip] if now - t < window]
-            
-            if len(rate_limit_store[client_ip]) >= limit:
-                return jsonify({'error': 'Rate limit exceeded. Try again later.'}), 429
-            
-            rate_limit_store[client_ip].append(now)
-            return f(*args, **kwargs)
-        return decorated_function
-    return decorator
+print(f"Loaded users: {list(USER_IPS.keys())}")  # Debug log
 
 def get_ovh_client():
     """Initialize OVH API client"""
@@ -61,32 +40,8 @@ def validate_hostname(hostname):
     """Validate hostname format for PTR record"""
     if not hostname or len(hostname) > 255:
         return False
-    # Allow alphanumeric, hyphens, dots (basic validation)
     pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
     return re.match(pattern, hostname) is not None
-
-def authenticate():
-    """Authenticate user via API key or email header"""
-    # Method 1: API Key
-    api_key = request.headers.get('X-API-Key')
-    if api_key:
-        for email, api_keys in API_KEYS.items():
-            if api_key in api_keys:
-                return email
-    
-    # Method 2: Email header (simpler for testing)
-    email = request.headers.get('X-User-Email')
-    if email and email in USER_IPS:
-        return email
-    
-    return None
-
-# API Keys mapping (optional, more secure)
-API_KEYS = {}
-for key, value in os.environ.items():
-    if key.startswith('API_KEY_'):
-        email = key.replace('API_KEY_', '').replace('_', '@')
-        API_KEYS[email] = value.split(',')
 
 # HTML template for web interface
 HTML_TEMPLATE = '''
@@ -117,11 +72,6 @@ HTML_TEMPLATE = '''
             padding: 20px;
             margin-bottom: 15px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            transition: transform 0.2s;
-        }
-        .ip-card:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
         }
         .ip-address {
             font-family: monospace;
@@ -136,11 +86,6 @@ HTML_TEMPLATE = '''
             border-radius: 5px;
             margin: 10px 0;
             font-family: monospace;
-            word-break: break-all;
-        }
-        .current-ptr label {
-            font-weight: bold;
-            color: #666;
         }
         input {
             width: 100%;
@@ -150,10 +95,6 @@ HTML_TEMPLATE = '''
             font-size: 14px;
             margin: 10px 0;
         }
-        input:focus {
-            outline: none;
-            border-color: #0066cc;
-        }
         button {
             background: #0066cc;
             color: white;
@@ -162,14 +103,9 @@ HTML_TEMPLATE = '''
             border-radius: 5px;
             cursor: pointer;
             font-size: 14px;
-            transition: background 0.2s;
         }
         button:hover {
             background: #0052a3;
-        }
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
         }
         .success {
             color: #28a745;
@@ -208,19 +144,6 @@ HTML_TEMPLATE = '''
             background: #dc3545;
             margin-left: 10px;
         }
-        .logout-btn:hover {
-            background: #c82333;
-        }
-        .auth-section {
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            text-align: center;
-        }
-        .auth-section input {
-            max-width: 300px;
-            margin: 10px auto;
-        }
     </style>
 </head>
 <body>
@@ -239,129 +162,98 @@ HTML_TEMPLATE = '''
 
     <script>
         const API_URL = window.location.origin;
-        let currentEmail = localStorage.getItem('user_email');
-        let apiKey = localStorage.getItem('api_key');
         
         async function init() {
-            if (!currentEmail && !apiKey) {
-                showAuth();
+            // Check if user is already logged in
+            let userEmail = localStorage.getItem('user_email');
+            if (userEmail) {
+                await loadIPs(userEmail);
             } else {
-                await loadIPs();
+                showAuth();
             }
         }
         
         function showAuth() {
             const content = document.getElementById('content');
             content.innerHTML = `
-                <div class="auth-section">
+                <div style="background: white; padding: 30px; border-radius: 10px; text-align: center;">
                     <h2>Authentication Required</h2>
-                    <p>Enter your email or API key to access your IPs</p>
-                    <input type="email" id="email" placeholder="your@email.com">
+                    <p>Enter your email to access your IPs</p>
+                    <input type="email" id="email" placeholder="your@email.com" style="max-width: 300px; margin: 10px auto;">
                     <button onclick="login()">Continue with Email</button>
-                    <hr style="margin: 20px 0">
-                    <p>Or use API Key:</p>
-                    <input type="text" id="apikey" placeholder="Your API Key">
-                    <button onclick="loginWithApiKey()">Continue with API Key</button>
                 </div>
             `;
         }
         
-        window.login = function() {
+        window.login = async function() {
             const email = document.getElementById('email').value;
             if (email) {
                 localStorage.setItem('user_email', email);
-                currentEmail = email;
-                loadIPs();
-            }
-        };
-        
-        window.loginWithApiKey = function() {
-            const key = document.getElementById('apikey').value;
-            if (key) {
-                localStorage.setItem('api_key', key);
-                apiKey = key;
-                loadIPs();
+                await loadIPs(email);
             }
         };
         
         window.logout = function() {
             localStorage.removeItem('user_email');
-            localStorage.removeItem('api_key');
-            currentEmail = null;
-            apiKey = null;
             showAuth();
         };
         
-        async function loadIPs() {
+        async function loadIPs(email) {
             const content = document.getElementById('content');
             content.innerHTML = '<div style="text-align: center"><div class="loading"></div><p>Loading your IPs...</p></div>';
             
             try {
-                const headers = {};
-                if (apiKey) {
-                    headers['X-API-Key'] = apiKey;
-                } else if (currentEmail) {
-                    headers['X-User-Email'] = currentEmail;
-                }
-                
-                const response = await fetch(`${API_URL}/api/my-ips`, { headers });
+                const response = await fetch(`${API_URL}/api/my-ips`, {
+                    headers: {'X-User-Email': email}
+                });
                 const data = await response.json();
                 
-                if (response.status === 401) {
-                    showAuth();
+                if (response.status === 401 || !data.ips || data.ips.length === 0) {
+                    content.innerHTML = '<div class="error" style="background: white; padding: 20px; text-align: center;">No IPs found for your account. Contact administrator.</div><button onclick="logout()" style="margin-top: 10px;">Try Again</button>';
                     return;
                 }
                 
-                if (data.ips && data.ips.length > 0) {
-                    await displayIPs(data.ips);
-                } else {
-                    content.innerHTML = '<div class="error">No IPs found for your account. Contact administrator.</div>';
-                }
+                await displayIPs(data.ips, email);
             } catch (error) {
                 content.innerHTML = '<div class="error">Error loading IPs. Please try again.</div>';
             }
         }
         
-        async function displayIPs(ips) {
+        async function displayIPs(ips, email) {
             const content = document.getElementById('content');
-            content.innerHTML = '<button onclick="logout()" class="logout-btn" style="margin-bottom: 20px">🚪 Logout</button><div id="ips-list"></div>';
+            content.innerHTML = `<button onclick="logout()" class="logout-btn" style="margin-bottom: 20px">🚪 Logout (${email})</button><div id="ips-list"></div>`;
             const ipsList = document.getElementById('ips-list');
             
             for (const ip of ips) {
-                await loadIPDetails(ip, ipsList);
+                await loadIPDetails(ip, ipsList, email);
             }
         }
         
-        async function loadIPDetails(ip, container) {
+        async function loadIPDetails(ip, container, email) {
             const ipDiv = document.createElement('div');
             ipDiv.className = 'ip-card';
             ipDiv.innerHTML = `
                 <div class="ip-address">🌐 ${ip}</div>
                 <div class="current-ptr">
-                    <label>Current PTR Record:</label>
-                    <div id="ptr-${ip.replace(/\./g, '-')}">Loading...</div>
+                    <strong>Current PTR:</strong><br>
+                    <span id="ptr-${ip.replace(/\./g, '-')}">Loading...</span>
                 </div>
                 <input type="text" id="input-${ip.replace(/\./g, '-')}" placeholder="hostname.example.com">
-                <button onclick="updateRDNS('${ip}')" id="btn-${ip.replace(/\./g, '-')}">Update rDNS</button>
+                <button onclick="updateRDNS('${ip}', '${email}')" id="btn-${ip.replace(/\./g, '-')}">Update rDNS</button>
                 <div id="msg-${ip.replace(/\./g, '-')}"></div>
             `;
             container.appendChild(ipDiv);
             
             // Load current rDNS
-            await refreshRDNS(ip);
+            await refreshRDNS(ip, email);
         }
         
-        async function refreshRDNS(ip) {
+        async function refreshRDNS(ip, email) {
             const ptrSpan = document.getElementById(`ptr-${ip.replace(/\./g, '-')}`);
             try {
-                const headers = {};
-                if (apiKey) {
-                    headers['X-API-Key'] = apiKey;
-                } else if (currentEmail) {
-                    headers['X-User-Email'] = currentEmail;
-                }
-                
-                const response = await fetch(`${API_URL}/api/rdns/${ip}`, { headers });
+                const response = await fetch(`${API_URL}/api/rdns/${ip}`, {
+                    headers: {'X-User-Email': email}
+                });
                 const data = await response.json();
                 
                 if (data.ptr) {
@@ -374,7 +266,7 @@ HTML_TEMPLATE = '''
             }
         }
         
-        window.updateRDNS = async function(ip) {
+        window.updateRDNS = async function(ip, email) {
             const inputId = `input-${ip.replace(/\./g, '-')}`;
             const msgId = `msg-${ip.replace(/\./g, '-')}`;
             const btnId = `btn-${ip.replace(/\./g, '-')}`;
@@ -393,18 +285,12 @@ HTML_TEMPLATE = '''
             msgDiv.innerHTML = '<div class="loading"></div> Updating...';
             
             try {
-                const headers = {
-                    'Content-Type': 'application/json'
-                };
-                if (apiKey) {
-                    headers['X-API-Key'] = apiKey;
-                } else if (currentEmail) {
-                    headers['X-User-Email'] = currentEmail;
-                }
-                
                 const response = await fetch(`${API_URL}/api/rdns/${ip}`, {
                     method: 'PUT',
-                    headers: headers,
+                    headers: {
+                        'X-User-Email': email,
+                        'Content-Type': 'application/json'
+                    },
                     body: JSON.stringify({ ptr_record: ptr })
                 });
                 
@@ -412,7 +298,7 @@ HTML_TEMPLATE = '''
                 
                 if (response.ok) {
                     msgDiv.innerHTML = '<div class="success">✓ Updated successfully! Changes will take effect in 5-10 minutes.</div>';
-                    await refreshRDNS(ip);
+                    await refreshRDNS(ip, email);
                     document.getElementById(inputId).value = '';
                 } else {
                     msgDiv.innerHTML = `<div class="error">Error: ${data.error || 'Update failed'}</div>`;
@@ -437,25 +323,22 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/my-ips', methods=['GET'])
-@rate_limit(limit=50, window=3600)
 def get_my_ips():
     """Get list of IPs for authenticated user"""
-    email = authenticate()
-    if not email:
+    email = request.headers.get('X-User-Email')
+    if not email or email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
     
     ips = USER_IPS.get(email, [])
     return jsonify({'ips': ips, 'email': email})
 
 @app.route('/api/rdns/<ip>', methods=['GET'])
-@rate_limit(limit=100, window=3600)
 def get_rdns(ip):
     """Get current rDNS for an IP"""
-    email = authenticate()
-    if not email:
+    email = request.headers.get('X-User-Email')
+    if not email or email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    # Verify user owns this IP
     if ip not in USER_IPS.get(email, []):
         return jsonify({'error': 'You do not own this IP'}), 403
     
@@ -464,36 +347,30 @@ def get_rdns(ip):
         return jsonify({'error': 'API configuration error'}), 500
     
     try:
-        # Try to get reverse DNS
         result = client.get(f'/ip/{ip}/reverse')
         ptr = result.get('reverse', '')
         return jsonify({'ip': ip, 'ptr': ptr})
     except Exception as e:
-        # IP might not have reverse DNS set yet
         if '404' in str(e):
             return jsonify({'ip': ip, 'ptr': None})
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/rdns/<ip>', methods=['PUT'])
-@rate_limit(limit=20, window=3600)  # Stricter limit for updates
 def update_rdns(ip):
     """Update rDNS for an IP"""
-    email = authenticate()
-    if not email:
+    email = request.headers.get('X-User-Email')
+    if not email or email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    # Verify user owns this IP
     if ip not in USER_IPS.get(email, []):
         return jsonify({'error': 'You do not own this IP'}), 403
     
     data = request.json
     ptr_record = data.get('ptr_record', '').strip()
     
-    # Validate hostname
     if not validate_hostname(ptr_record):
-        return jsonify({'error': 'Invalid hostname format. Use: example.com or mail.example.com'}), 400
+        return jsonify({'error': 'Invalid hostname format'}), 400
     
-    # Ensure trailing dot (OVH sometimes requires it)
     if not ptr_record.endswith('.'):
         ptr_record += '.'
     
@@ -502,12 +379,10 @@ def update_rdns(ip):
         return jsonify({'error': 'API configuration error'}), 500
     
     try:
-        # Update reverse DNS
         client.put(f'/ip/{ip}/reverse', 
                   ipReverse=ptr_record,
                   ip=ip)
         
-        # Log the change (optional: save to database)
         print(f"[AUDIT] {email} changed rDNS for {ip} to {ptr_record}")
         
         return jsonify({'success': True, 'ip': ip, 'ptr': ptr_record})
