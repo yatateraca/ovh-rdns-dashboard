@@ -2,31 +2,27 @@ from flask import Flask, request, jsonify, render_template_string
 from ovh import Client
 import os
 import re
-from functools import wraps
 from datetime import datetime
-import json
 
 app = Flask(__name__)
 
-# Configuration from environment variables
+# ============ CONFIGURATION ============
 OVH_ENDPOINT = os.environ.get('OVH_ENDPOINT', 'ovh-eu')
 OVH_APP_KEY = os.environ.get('OVH_APP_KEY')
 OVH_APP_SECRET = os.environ.get('OVH_APP_SECRET')
 OVH_CONSUMER_KEY = os.environ.get('OVH_CONSUMER_KEY')
 
-# User to IPs mapping (format: email:ip1,ip2,ip3)
+# Load users from environment variables (USER_email@domain.com = ip1,ip2)
 USER_IPS = {}
 for key, value in os.environ.items():
     if key.startswith('USER_'):
-        # Convert USER_yatateraca_gmail.com back to yatateraca@gmail.com
+        # Convert USER_name_gmail.com back to name@gmail.com
         email = key.replace('USER_', '').replace('_', '@')
         ips = value.split(',')
         USER_IPS[email] = [ip.strip() for ip in ips]
 
-print(f"Loaded users: {list(USER_IPS.keys())}")  # Debug log
-
+# ============ HELPER FUNCTIONS ============
 def get_ovh_client():
-    """Initialize OVH API client"""
     if not all([OVH_APP_KEY, OVH_APP_SECRET, OVH_CONSUMER_KEY]):
         return None
     return Client(
@@ -37,13 +33,12 @@ def get_ovh_client():
     )
 
 def validate_hostname(hostname):
-    """Validate hostname format for PTR record"""
     if not hostname or len(hostname) > 255:
         return False
     pattern = r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'
     return re.match(pattern, hostname) is not None
 
-# HTML template for web interface
+# ============ HTML FRONTEND ============
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
@@ -104,23 +99,10 @@ HTML_TEMPLATE = '''
             cursor: pointer;
             font-size: 14px;
         }
-        button:hover {
-            background: #0052a3;
-        }
-        .success {
-            color: #28a745;
-            margin-top: 10px;
-            padding: 8px;
-            background: #d4edda;
-            border-radius: 5px;
-        }
-        .error {
-            color: #dc3545;
-            margin-top: 10px;
-            padding: 8px;
-            background: #f8d7da;
-            border-radius: 5px;
-        }
+        button:hover { background: #0052a3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .success { color: #28a745; margin-top: 10px; padding: 8px; background: #d4edda; border-radius: 5px; }
+        .error { color: #dc3545; margin-top: 10px; padding: 8px; background: #f8d7da; border-radius: 5px; }
         .loading {
             display: inline-block;
             width: 20px;
@@ -134,16 +116,9 @@ HTML_TEMPLATE = '''
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            color: #666;
-            font-size: 12px;
-        }
-        .logout-btn {
-            background: #dc3545;
-            margin-left: 10px;
-        }
+        .footer { text-align: center; margin-top: 30px; color: #666; font-size: 12px; }
+        .logout-btn { background: #dc3545; margin-left: 10px; }
+        .logout-btn:hover { background: #c82333; }
     </style>
 </head>
 <body>
@@ -152,9 +127,7 @@ HTML_TEMPLATE = '''
             <h1>🔧 Reverse DNS Manager</h1>
             <p>Manage your IP reverse DNS (PTR) records</p>
         </div>
-        
         <div id="content"></div>
-        
         <div class="footer">
             <p>Changes take 5-10 minutes to propagate globally</p>
         </div>
@@ -164,7 +137,6 @@ HTML_TEMPLATE = '''
         const API_URL = window.location.origin;
         
         async function init() {
-            // Check if user is already logged in
             let userEmail = localStorage.getItem('user_email');
             if (userEmail) {
                 await loadIPs(userEmail);
@@ -174,8 +146,7 @@ HTML_TEMPLATE = '''
         }
         
         function showAuth() {
-            const content = document.getElementById('content');
-            content.innerHTML = `
+            document.getElementById('content').innerHTML = `
                 <div style="background: white; padding: 30px; border-radius: 10px; text-align: center;">
                     <h2>Authentication Required</h2>
                     <p>Enter your email to access your IPs</p>
@@ -208,8 +179,8 @@ HTML_TEMPLATE = '''
                 });
                 const data = await response.json();
                 
-                if (response.status === 401 || !data.ips || data.ips.length === 0) {
-                    content.innerHTML = '<div class="error" style="background: white; padding: 20px; text-align: center;">No IPs found for your account. Contact administrator.</div><button onclick="logout()" style="margin-top: 10px;">Try Again</button>';
+                if (!data.ips || data.ips.length === 0) {
+                    content.innerHTML = '<div class="error" style="background: white; padding: 20px; text-align: center;">No IPs found. Contact administrator.</div><button onclick="logout()" style="margin-top: 10px;">Try Again</button>';
                     return;
                 }
                 
@@ -243,8 +214,6 @@ HTML_TEMPLATE = '''
                 <div id="msg-${ip.replace(/\./g, '-')}"></div>
             `;
             container.appendChild(ipDiv);
-            
-            // Load current rDNS
             await refreshRDNS(ip, email);
         }
         
@@ -255,7 +224,6 @@ HTML_TEMPLATE = '''
                     headers: {'X-User-Email': email}
                 });
                 const data = await response.json();
-                
                 if (data.ptr) {
                     ptrSpan.innerHTML = `<code>${data.ptr}</code>`;
                 } else {
@@ -317,24 +285,21 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+# ============ API ENDPOINTS ============
 @app.route('/')
 def index():
-    """Serve the web interface"""
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/api/my-ips', methods=['GET'])
 def get_my_ips():
-    """Get list of IPs for authenticated user"""
     email = request.headers.get('X-User-Email')
     if not email or email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    ips = USER_IPS.get(email, [])
-    return jsonify({'ips': ips, 'email': email})
+    return jsonify({'ips': USER_IPS.get(email, []), 'email': email})
 
 @app.route('/api/rdns/<ip>', methods=['GET'])
 def get_rdns(ip):
-    """Get current rDNS for an IP"""
     email = request.headers.get('X-User-Email')
     if not email or email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -347,17 +312,23 @@ def get_rdns(ip):
         return jsonify({'error': 'API configuration error'}), 500
     
     try:
-        result = client.get(f'/ip/{ip}/reverse')
-        ptr = result.get('reverse', '')
-        return jsonify({'ip': ip, 'ptr': ptr})
-    except Exception as e:
-        if '404' in str(e):
+        # GET /ip/{ip}/reverse returns a list of reverse entries
+        reverses = client.get(f'/ip/{ip}/reverse')
+        
+        if reverses and len(reverses) > 0:
+            ptr = reverses[0].get('ipReverse', '')
+            # Remove trailing dot for display
+            if ptr.endswith('.'):
+                ptr = ptr[:-1]
+            return jsonify({'ip': ip, 'ptr': ptr})
+        else:
             return jsonify({'ip': ip, 'ptr': None})
-        return jsonify({'error': str(e)}), 500
+    except Exception as e:
+        print(f"Error: {e}")
+        return jsonify({'ip': ip, 'ptr': None})
 
 @app.route('/api/rdns/<ip>', methods=['PUT'])
 def update_rdns(ip):
-    """Update rDNS for an IP"""
     email = request.headers.get('X-User-Email')
     if not email or email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
@@ -371,27 +342,41 @@ def update_rdns(ip):
     if not validate_hostname(ptr_record):
         return jsonify({'error': 'Invalid hostname format'}), 400
     
-    if not ptr_record.endswith('.'):
-        ptr_record += '.'
+    # Remove trailing dot if present
+    if ptr_record.endswith('.'):
+        ptr_record = ptr_record[:-1]
     
     client = get_ovh_client()
     if not client:
         return jsonify({'error': 'API configuration error'}), 500
     
     try:
-        client.put(f'/ip/{ip}/reverse', 
-                  ipReverse=ptr_record,
-                  ip=ip)
+        # OVH uses POST to create/update reverse DNS (NOT PUT)
+        result = client.post(f'/ip/{ip}/reverse', ipReverse=ptr_record)
         
-        print(f"[AUDIT] {email} changed rDNS for {ip} to {ptr_record}")
-        
+        print(f"[AUDIT] {email} updated rDNS for {ip} to {ptr_record}")
         return jsonify({'success': True, 'ip': ip, 'ptr': ptr_record})
+        
     except Exception as e:
-        return jsonify({'error': f'OVH API error: {str(e)}'}), 500
+        error_msg = str(e)
+        print(f"Error: {error_msg}")
+        
+        # If POST fails, try deleting existing first
+        try:
+            reverses = client.get(f'/ip/{ip}/reverse')
+            for reverse in reverses:
+                try:
+                    client.delete(f'/ip/{ip}/reverse/{reverse.get("ipReverse")}')
+                except:
+                    pass
+            
+            result = client.post(f'/ip/{ip}/reverse', ipReverse=ptr_record)
+            return jsonify({'success': True, 'ip': ip, 'ptr': ptr_record})
+        except Exception as e2:
+            return jsonify({'error': f'OVH API error: {str(e2)}'}), 500
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Health check endpoint"""
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 if __name__ == '__main__':
