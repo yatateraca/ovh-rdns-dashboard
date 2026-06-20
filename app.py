@@ -7,33 +7,98 @@ import secrets
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 
-# OVH credentials from environment
+# Default OVH endpoint
 OVH_ENDPOINT = os.environ.get('OVH_ENDPOINT', 'ovh-eu')
-OVH_APP_KEY = os.environ.get('OVH_APP_KEY')
-OVH_APP_SECRET = os.environ.get('OVH_APP_SECRET')
-OVH_CONSUMER_KEY = os.environ.get('OVH_CONSUMER_KEY')
 
-# Load users and passwords from environment
+# ============ MULTI-ACCOUNT CONFIGURATION ============
+# Format for environment variables:
+# OVH_ACCOUNT_1_APP_KEY = key_for_account_1
+# OVH_ACCOUNT_1_APP_SECRET = secret_for_account_1
+# OVH_ACCOUNT_1_CONSUMER_KEY = consumer_for_account_1
+# OVH_ACCOUNT_2_APP_KEY = key_for_account_2
+# etc.
+
+OVH_ACCOUNTS = {}
+
+# Load all OVH accounts from environment
+for key, value in os.environ.items():
+    if key.startswith('OVH_ACCOUNT_'):
+        # Parse: OVH_ACCOUNT_1_APP_KEY -> account_name = "1", key_type = "APP_KEY"
+        parts = key.split('_')
+        if len(parts) >= 4:
+            account_name = parts[2]  # Get account number/name
+            key_type = '_'.join(parts[3:])  # APP_KEY, APP_SECRET, or CONSUMER_KEY
+            
+            if account_name not in OVH_ACCOUNTS:
+                OVH_ACCOUNTS[account_name] = {}
+            
+            if key_type == 'APP_KEY':
+                OVH_ACCOUNTS[account_name]['app_key'] = value
+            elif key_type == 'APP_SECRET':
+                OVH_ACCOUNTS[account_name]['app_secret'] = value
+            elif key_type == 'CONSUMER_KEY':
+                OVH_ACCOUNTS[account_name]['consumer_key'] = value
+
+print(f"Loaded {len(OVH_ACCOUNTS)} OVH account(s)")  # Debug log
+
+# ============ IP TO ACCOUNT MAPPING ============
+# Format: IP_ACCOUNT_192.168.1.1 = "1" (maps IP to account number 1)
+IP_TO_ACCOUNT = {}
+
+for key, value in os.environ.items():
+    if key.startswith('IP_ACCOUNT_'):
+        ip = key.replace('IP_ACCOUNT_', '')
+        IP_TO_ACCOUNT[ip] = value
+
+print(f"Mapped {len(IP_TO_ACCOUNT)} IP(s) to accounts")  # Debug log
+
+# ============ USER MANAGEMENT ============
 USER_IPS = {}
 USER_PASSWORDS = {}
 
 for key, value in os.environ.items():
     if key.startswith('USER_'):
         email = key.replace('USER_', '').replace('_', '@')
-        # Split IPs by comma and strip any spaces
         ips = [ip.strip() for ip in value.split(',')]
         USER_IPS[email] = ips
-        print(f"Loaded user: {email} with IPs: {ips}")  # Debug log
+        print(f"User {email} has IPs: {ips}")  # Debug log
     elif key.startswith('PASS_'):
         email = key.replace('PASS_', '').replace('_', '@')
         USER_PASSWORDS[email] = value
 
-# HTML template
+# ============ HELPER FUNCTION ============
+def get_ovh_client_for_ip(ip):
+    """Get the correct OVH client for a specific IP"""
+    account_name = IP_TO_ACCOUNT.get(ip)
+    
+    if not account_name:
+        print(f"No account mapping found for IP: {ip}")
+        return None
+    
+    if account_name not in OVH_ACCOUNTS:
+        print(f"Account {account_name} not configured for IP: {ip}")
+        return None
+    
+    account = OVH_ACCOUNTS[account_name]
+    
+    # Validate account has all required keys
+    if not all(k in account for k in ['app_key', 'app_secret', 'consumer_key']):
+        print(f"Account {account_name} missing credentials for IP: {ip}")
+        return None
+    
+    return Client(
+        endpoint=OVH_ENDPOINT,
+        application_key=account['app_key'],
+        application_secret=account['app_secret'],
+        consumer_key=account['consumer_key'],
+    )
+
+# ============ HTML TEMPLATE ============
 HTML = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>rDNS Manager</title>
+    <title>Multi-Account rDNS Manager</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         * { box-sizing: border-box; }
@@ -68,10 +133,20 @@ HTML = '''
         }
         .ip-address {
             font-family: monospace;
-            font-size: 1.3em;
+            font-size: 1.2em;
             font-weight: bold;
             color: #0066cc;
-            margin-bottom: 15px;
+            margin-bottom: 10px;
+        }
+        .account-badge {
+            display: inline-block;
+            background: #e9ecef;
+            color: #495057;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            margin-left: 10px;
+            vertical-align: middle;
         }
         .current-ptr {
             background: #f8f9fa;
@@ -81,9 +156,6 @@ HTML = '''
             font-family: monospace;
             word-break: break-all;
             border: 1px solid #e0e0e0;
-        }
-        .current-ptr strong {
-            color: #666;
         }
         input {
             width: 100%;
@@ -105,29 +177,11 @@ HTML = '''
             border-radius: 6px;
             cursor: pointer;
             font-size: 14px;
-            font-weight: bold;
         }
-        button:hover {
-            background: #0052a3;
-        }
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-        .success {
-            color: #28a745;
-            margin-top: 10px;
-            padding: 10px;
-            background: #d4edda;
-            border-radius: 5px;
-        }
-        .error {
-            color: #dc3545;
-            margin-top: 10px;
-            padding: 10px;
-            background: #f8d7da;
-            border-radius: 5px;
-        }
+        button:hover { background: #0052a3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .success { color: #28a745; margin-top: 10px; padding: 10px; background: #d4edda; border-radius: 5px; }
+        .error { color: #dc3545; margin-top: 10px; padding: 10px; background: #f8d7da; border-radius: 5px; }
         .loading {
             display: inline-block;
             width: 20px;
@@ -141,19 +195,9 @@ HTML = '''
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            color: #666;
-            font-size: 12px;
-        }
-        .logout-btn {
-            background: #dc3545;
-            margin-bottom: 20px;
-        }
-        .logout-btn:hover {
-            background: #c82333;
-        }
+        .footer { text-align: center; margin-top: 30px; color: #666; font-size: 12px; }
+        .logout-btn { background: #dc3545; margin-bottom: 20px; }
+        .logout-btn:hover { background: #c82333; }
         .user-info {
             background: #e3f2fd;
             padding: 12px;
@@ -163,53 +207,40 @@ HTML = '''
             justify-content: space-between;
             align-items: center;
         }
-        .badge {
-            background: #28a745;
-            color: white;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-        }
+        .badge { background: #28a745; color: white; padding: 4px 12px; border-radius: 20px; font-size: 12px; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🔧 Reverse DNS Manager</h1>
-        <p>Manage your IP reverse DNS (PTR) records</p>
+        <h1>🔧 Multi-Account Reverse DNS Manager</h1>
+        <p>Manage rDNS across multiple OVH accounts</p>
     </div>
 
     {% if not session.logged_in %}
     <div class="login-box">
-        <h2>🔐 Login Required</h2>
+        <h2>🔐 Login</h2>
         <form method="POST" action="/login">
-            <input type="email" name="email" placeholder="Email address" required style="width: 100%; max-width: 320px;">
+            <input type="email" name="email" placeholder="Email" required style="width: 100%; max-width: 320px;">
             <br>
             <input type="password" name="password" placeholder="Password" required style="width: 100%; max-width: 320px;">
             <br>
             <button type="submit">Login</button>
         </form>
-        {% if error %}
-        <p class="error">{{ error }}</p>
-        {% endif %}
+        {% if error %}<p class="error">{{ error }}</p>{% endif %}
     </div>
     {% else %}
 
     <div>
         <div class="user-info">
-            <span>👤 Logged in as: <strong>{{ session.email }}</strong></span>
-            <span class="badge">Authenticated</span>
+            <span>👤 Logged in: <strong>{{ session.email }}</strong></span>
+            <span class="badge">Multi-Account Mode</span>
         </div>
         <button class="logout-btn" onclick="logout()">🚪 Logout</button>
-        <div id="ips-container">
-            <div style="text-align: center; padding: 40px;">
-                <div class="loading"></div>
-                <p>Loading your IP addresses...</p>
-            </div>
-        </div>
+        <div id="ips-container"><div style="text-align: center; padding: 40px;"><div class="loading"></div><p>Loading your IPs...</p></div></div>
     </div>
 
     <div class="footer">
-        <p>⏱️ Changes take 5-10 minutes to propagate globally</p>
+        <p>⏱️ Changes take 5-10 minutes to propagate | Supports multiple OVH accounts</p>
     </div>
 
     <script>
@@ -222,15 +253,14 @@ HTML = '''
                     const container = document.getElementById('ips-container');
                     container.innerHTML = '';
                     
-                    for (let i = 0; i < data.ips.length; i++) {
-                        const ip = data.ips[i];
+                    for (const ip of data.ips) {
                         await displayIP(ip, container);
                     }
                 } else {
-                    document.getElementById('ips-container').innerHTML = '<div class="error">No IPs found for your account. Contact administrator.</div>';
+                    document.getElementById('ips-container').innerHTML = '<div class="error">No IPs found for your account.</div>';
                 }
             } catch (error) {
-                document.getElementById('ips-container').innerHTML = '<div class="error">Error loading IPs. Please refresh the page.</div>';
+                document.getElementById('ips-container').innerHTML = '<div class="error">Error loading IPs.</div>';
             }
         }
         
@@ -239,17 +269,37 @@ HTML = '''
             const ipDiv = document.createElement('div');
             ipDiv.className = 'ip-card';
             ipDiv.innerHTML = `
-                <div class="ip-address">🌐 ${ip}</div>
+                <div class="ip-address">
+                    🌐 ${ip}
+                    <span class="account-badge" id="account-${ipId}">Loading account...</span>
+                </div>
                 <div class="current-ptr">
-                    <strong>📝 Current PTR Record:</strong><br>
+                    <strong>📝 Current PTR:</strong><br>
                     <span id="ptr-${ipId}">Loading...</span>
                 </div>
-                <input type="text" id="input-${ipId}" placeholder="Enter hostname (e.g., mail.yourdomain.com)">
+                <input type="text" id="input-${ipId}" placeholder="hostname.example.com">
                 <button onclick="updateRDNS('${ip}')" id="btn-${ipId}">🔄 Update rDNS</button>
                 <div id="msg-${ipId}"></div>
             `;
             container.appendChild(ipDiv);
-            await refreshRDNS(ip);
+            
+            // Get account info and current PTR
+            await Promise.all([
+                refreshAccountInfo(ip),
+                refreshRDNS(ip)
+            ]);
+        }
+        
+        async function refreshAccountInfo(ip) {
+            const ipId = ip.replace(/\./g, '-');
+            const accountSpan = document.getElementById(`account-${ipId}`);
+            try {
+                const response = await fetch(`/api/account/${ip}`);
+                const data = await response.json();
+                accountSpan.innerHTML = `📁 Account: ${data.account || 'Unknown'}`;
+            } catch {
+                accountSpan.innerHTML = `📁 Account: Unknown`;
+            }
         }
         
         async function refreshRDNS(ip) {
@@ -258,34 +308,26 @@ HTML = '''
             try {
                 const response = await fetch(`/api/rdns/${ip}`);
                 const data = await response.json();
-                if (data.ptr && data.ptr !== 'None') {
-                    ptrSpan.innerHTML = `<code style="background: #e9ecef; padding: 4px 8px; border-radius: 4px;">${data.ptr}</code>`;
-                } else {
-                    ptrSpan.innerHTML = '<em style="color: #999;">No PTR record set</em>';
-                }
-            } catch (error) {
+                ptrSpan.innerHTML = data.ptr ? `<code>${data.ptr}</code>` : '<em>No PTR record set</em>';
+            } catch {
                 ptrSpan.innerHTML = '<span class="error">Failed to load</span>';
             }
         }
         
         async function updateRDNS(ip) {
             const ipId = ip.replace(/\./g, '-');
-            const inputId = `input-${ipId}`;
-            const msgId = `msg-${ipId}`;
-            const btnId = `btn-${ipId}`;
-            
-            const ptr = document.getElementById(inputId).value;
-            const msgDiv = document.getElementById(msgId);
-            const button = document.getElementById(btnId);
+            const ptr = document.getElementById(`input-${ipId}`).value;
+            const msgDiv = document.getElementById(`msg-${ipId}`);
+            const button = document.getElementById(`btn-${ipId}`);
             
             if (!ptr) {
-                msgDiv.innerHTML = '<div class="error">❌ Please enter a hostname</div>';
+                msgDiv.innerHTML = '<div class="error">❌ Enter a hostname</div>';
                 return;
             }
             
             button.disabled = true;
             button.textContent = 'Updating...';
-            msgDiv.innerHTML = '<div class="loading"></div> Updating rDNS...';
+            msgDiv.innerHTML = '<div class="loading"></div> Updating...';
             
             try {
                 const response = await fetch(`/api/rdns/${ip}`, {
@@ -293,31 +335,25 @@ HTML = '''
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ ptr_record: ptr })
                 });
-                
-                const data = await response.json();
+                const result = await response.json();
                 
                 if (response.ok) {
-                    msgDiv.innerHTML = '<div class="success">✅ Updated successfully! Changes will take 5-10 minutes to propagate.</div>';
+                    msgDiv.innerHTML = '<div class="success">✅ Updated! Takes 5-10 minutes.</div>';
                     await refreshRDNS(ip);
-                    document.getElementById(inputId).value = '';
-                    setTimeout(() => {
-                        msgDiv.innerHTML = '';
-                    }, 5000);
+                    document.getElementById(`input-${ipId}`).value = '';
+                    setTimeout(() => msgDiv.innerHTML = '', 5000);
                 } else {
-                    msgDiv.innerHTML = `<div class="error">❌ Error: ${data.error || 'Update failed'}</div>`;
+                    msgDiv.innerHTML = `<div class="error">❌ Error: ${result.error}</div>`;
                 }
-            } catch (error) {
-                msgDiv.innerHTML = '<div class="error">❌ Network error. Please try again.</div>';
+            } catch {
+                msgDiv.innerHTML = '<div class="error">❌ Network error</div>';
             } finally {
                 button.disabled = false;
                 button.textContent = '🔄 Update rDNS';
             }
         }
         
-        function logout() {
-            window.location.href = '/logout';
-        }
-        
+        function logout() { window.location.href = '/logout'; }
         loadIPs();
     </script>
     {% endif %}
@@ -325,6 +361,7 @@ HTML = '''
 </html>
 '''
 
+# ============ API ROUTES ============
 @app.route('/')
 def index():
     error = request.args.get('error')
@@ -335,14 +372,11 @@ def login():
     email = request.form.get('email')
     password = request.form.get('password')
     
-    expected_password = USER_PASSWORDS.get(email)
-    
-    if expected_password and password == expected_password:
+    if USER_PASSWORDS.get(email) == password:
         session['logged_in'] = True
         session['email'] = email
         return flask_redirect('/')
-    else:
-        return flask_redirect('/?error=Invalid email or password')
+    return flask_redirect('/?error=Invalid email or password')
 
 @app.route('/logout')
 def logout():
@@ -353,19 +387,22 @@ def logout():
 def get_ips():
     if not session.get('logged_in'):
         return jsonify({'error': 'Unauthorized'}), 401
-    
-    email = session.get('email')
-    if email in USER_IPS:
-        return jsonify({'ips': USER_IPS[email]})
-    return jsonify({'ips': []})
+    return jsonify({'ips': USER_IPS.get(session['email'], [])})
+
+@app.route('/api/account/<ip>')
+def get_account(ip):
+    if not session.get('logged_in'):
+        return jsonify({'error': 'Unauthorized'}), 401
+    account = IP_TO_ACCOUNT.get(ip, 'Unknown')
+    return jsonify({'ip': ip, 'account': account})
 
 @app.route('/api/rdns/<ip>')
 def get_rdns(ip):
     if not session.get('logged_in'):
         return jsonify({'error': 'Unauthorized'}), 401
     
-    email = session.get('email')
-    if email not in USER_IPS:
+    email = session['email']
+    if ip not in USER_IPS.get(email, []):
         return jsonify({'error': 'Unauthorized'}), 401
     
     try:
@@ -379,8 +416,8 @@ def update_rdns(ip):
     if not session.get('logged_in'):
         return jsonify({'error': 'Unauthorized'}), 401
     
-    email = session.get('email')
-    if email not in USER_IPS:
+    email = session['email']
+    if ip not in USER_IPS.get(email, []):
         return jsonify({'error': 'Unauthorized'}), 401
     
     data = request.json
@@ -392,12 +429,10 @@ def update_rdns(ip):
     if new_ptr.endswith('.'):
         new_ptr = new_ptr[:-1]
     
-    client = Client(
-        endpoint=OVH_ENDPOINT,
-        application_key=OVH_APP_KEY,
-        application_secret=OVH_APP_SECRET,
-        consumer_key=OVH_CONSUMER_KEY,
-    )
+    # Get the correct OVH client for this IP
+    client = get_ovh_client_for_ip(ip)
+    if not client:
+        return jsonify({'error': f'No OVH account configured for IP {ip}'}), 500
     
     try:
         client.post(f'/ip/{ip}/reverse', ipReverse=ip, reverse=new_ptr)
@@ -407,7 +442,7 @@ def update_rdns(ip):
 
 @app.route('/api/health')
 def health():
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'accounts': len(OVH_ACCOUNTS)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
