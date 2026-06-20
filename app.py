@@ -11,23 +11,27 @@ app.secret_key = secrets.token_hex(16)
 OVH_ENDPOINT = os.environ.get('OVH_ENDPOINT', 'ovh-eu')
 
 # ============ MULTI-ACCOUNT CONFIGURATION ============
-# Format for environment variables:
-# OVH_ACCOUNT_1_APP_KEY = key_for_account_1
-# OVH_ACCOUNT_1_APP_SECRET = secret_for_account_1
-# OVH_ACCOUNT_1_CONSUMER_KEY = consumer_for_account_1
-# OVH_ACCOUNT_2_APP_KEY = key_for_account_2
-# etc.
-
+# Load Account 1 separately (uses old format)
 OVH_ACCOUNTS = {}
 
-# Load all OVH accounts from environment
+# Load Account 1 from old format variables
+account_1 = {
+    'app_key': os.environ.get('OVH_APP_KEY'),
+    'app_secret': os.environ.get('OVH_APP_SECRET'),
+    'consumer_key': os.environ.get('OVH_CONSUMER_KEY'),
+}
+
+# Only add if all keys exist
+if all(account_1.values()):
+    OVH_ACCOUNTS['1'] = account_1
+
+# Load Account 2, 3, etc. from new format
 for key, value in os.environ.items():
     if key.startswith('OVH_ACCOUNT_'):
-        # Parse: OVH_ACCOUNT_1_APP_KEY -> account_name = "1", key_type = "APP_KEY"
         parts = key.split('_')
         if len(parts) >= 4:
-            account_name = parts[2]  # Get account number/name
-            key_type = '_'.join(parts[3:])  # APP_KEY, APP_SECRET, or CONSUMER_KEY
+            account_name = parts[2]
+            key_type = '_'.join(parts[3:])
             
             if account_name not in OVH_ACCOUNTS:
                 OVH_ACCOUNTS[account_name] = {}
@@ -39,10 +43,9 @@ for key, value in os.environ.items():
             elif key_type == 'CONSUMER_KEY':
                 OVH_ACCOUNTS[account_name]['consumer_key'] = value
 
-print(f"Loaded {len(OVH_ACCOUNTS)} OVH account(s)")  # Debug log
+print(f"Loaded {len(OVH_ACCOUNTS)} OVH account(s): {list(OVH_ACCOUNTS.keys())}")
 
 # ============ IP TO ACCOUNT MAPPING ============
-# Format: IP_ACCOUNT_192.168.1.1 = "1" (maps IP to account number 1)
 IP_TO_ACCOUNT = {}
 
 for key, value in os.environ.items():
@@ -50,7 +53,7 @@ for key, value in os.environ.items():
         ip = key.replace('IP_ACCOUNT_', '')
         IP_TO_ACCOUNT[ip] = value
 
-print(f"Mapped {len(IP_TO_ACCOUNT)} IP(s) to accounts")  # Debug log
+print(f"Mapped {len(IP_TO_ACCOUNT)} IP(s) to accounts")
 
 # ============ USER MANAGEMENT ============
 USER_IPS = {}
@@ -61,7 +64,6 @@ for key, value in os.environ.items():
         email = key.replace('USER_', '').replace('_', '@')
         ips = [ip.strip() for ip in value.split(',')]
         USER_IPS[email] = ips
-        print(f"User {email} has IPs: {ips}")  # Debug log
     elif key.startswith('PASS_'):
         email = key.replace('PASS_', '').replace('_', '@')
         USER_PASSWORDS[email] = value
@@ -71,9 +73,10 @@ def get_ovh_client_for_ip(ip):
     """Get the correct OVH client for a specific IP"""
     account_name = IP_TO_ACCOUNT.get(ip)
     
+    # If no mapping found, try Account 1 (fallback)
     if not account_name:
-        print(f"No account mapping found for IP: {ip}")
-        return None
+        print(f"No mapping found for {ip}, using Account 1 fallback")
+        account_name = '1'
     
     if account_name not in OVH_ACCOUNTS:
         print(f"Account {account_name} not configured for IP: {ip}")
@@ -81,13 +84,18 @@ def get_ovh_client_for_ip(ip):
     
     account = OVH_ACCOUNTS[account_name]
     
-    # Validate account has all required keys
     if not all(k in account for k in ['app_key', 'app_secret', 'consumer_key']):
         print(f"Account {account_name} missing credentials for IP: {ip}")
         return None
     
+    # Check for account-specific endpoint
+    endpoint_key = f'OVH_ACCOUNT_{account_name}_ENDPOINT'
+    endpoint = os.environ.get(endpoint_key, OVH_ENDPOINT)
+    
+    print(f"Using endpoint: {endpoint} for account {account_name}")
+    
     return Client(
-        endpoint=OVH_ENDPOINT,
+        endpoint=endpoint,
         application_key=account['app_key'],
         application_secret=account['app_secret'],
         consumer_key=account['consumer_key'],
@@ -283,7 +291,6 @@ HTML = '''
             `;
             container.appendChild(ipDiv);
             
-            // Get account info and current PTR
             await Promise.all([
                 refreshAccountInfo(ip),
                 refreshRDNS(ip)
@@ -393,7 +400,7 @@ def get_ips():
 def get_account(ip):
     if not session.get('logged_in'):
         return jsonify({'error': 'Unauthorized'}), 401
-    account = IP_TO_ACCOUNT.get(ip, 'Unknown')
+    account = IP_TO_ACCOUNT.get(ip, '1')
     return jsonify({'ip': ip, 'account': account})
 
 @app.route('/api/rdns/<ip>')
@@ -429,7 +436,6 @@ def update_rdns(ip):
     if new_ptr.endswith('.'):
         new_ptr = new_ptr[:-1]
     
-    # Get the correct OVH client for this IP
     client = get_ovh_client_for_ip(ip)
     if not client:
         return jsonify({'error': f'No OVH account configured for IP {ip}'}), 500
