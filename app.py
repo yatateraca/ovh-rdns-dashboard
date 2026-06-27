@@ -34,7 +34,7 @@ for key, value in os.environ.items():
         ip = key.replace('IP_ACCOUNT_', '')
         IP_TO_ACCOUNT[ip] = value
 
-# HTML template (same as your working version)
+# HTML template (same as before)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -426,6 +426,15 @@ def update_rdns(ip):
             application_key=os.environ.get('OVH_ACCOUNT_3_APP_KEY'),
             application_secret=os.environ.get('OVH_ACCOUNT_3_APP_SECRET'),
             consumer_key=os.environ.get('OVH_ACCOUNT_3_CONSUMER_KEY'),
+        )
+    elif account_number == '4':
+        # Use Account 4 credentials
+        endpoint = os.environ.get('OVH_ACCOUNT_4_ENDPOINT', OVH_ENDPOINT)
+        client = Client(
+            endpoint=endpoint,
+            application_key=os.environ.get('OVH_ACCOUNT_4_APP_KEY'),
+            application_secret=os.environ.get('OVH_ACCOUNT_4_APP_SECRET'),
+            consumer_key=os.environ.get('OVH_ACCOUNT_4_CONSUMER_KEY'),
         )
     else:
         return jsonify({'error': f'Unknown account number: {account_number}'}), 500
