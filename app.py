@@ -13,19 +13,22 @@ OVH_APP_KEY = os.environ.get('OVH_APP_KEY')
 OVH_APP_SECRET = os.environ.get('OVH_APP_SECRET')
 OVH_CONSUMER_KEY = os.environ.get('OVH_CONSUMER_KEY')
 
-# Load users and passwords from environment
+# Load users and passwords
 USER_IPS = {}
 USER_PASSWORDS = {}
+API_KEYS = {}
 
 for key, value in os.environ.items():
     if key.startswith('USER_'):
         email = key.replace('USER_', '').replace('_', '@')
         ips = [ip.strip() for ip in value.split(',')]
         USER_IPS[email] = ips
-        print(f"Loaded user: {email} with IPs: {ips}")
     elif key.startswith('PASS_'):
         email = key.replace('PASS_', '').replace('_', '@')
         USER_PASSWORDS[email] = value
+    elif key.startswith('API_KEY_'):
+        email = key.replace('API_KEY_', '').replace('_', '@')
+        API_KEYS[email] = value
 
 # IP to Account mapping
 IP_TO_ACCOUNT = {}
@@ -33,6 +36,24 @@ for key, value in os.environ.items():
     if key.startswith('IP_ACCOUNT_'):
         ip = key.replace('IP_ACCOUNT_', '')
         IP_TO_ACCOUNT[ip] = value
+
+def authenticate_api():
+    """Authenticate using API key from header"""
+    api_key = request.headers.get('X-API-Key')
+    if not api_key:
+        return None
+    
+    for email, key in API_KEYS.items():
+        if key == api_key:
+            return email
+    return None
+
+def get_user_email():
+    """Get authenticated user email from session or API key"""
+    email = session.get('email')
+    if email:
+        return email
+    return authenticate_api()
 
 # HTML template (same as before)
 HTML = '''
@@ -346,8 +367,16 @@ def login():
     if expected_password and password == expected_password:
         session['logged_in'] = True
         session['email'] = email
+        
+        # If API request, return JSON
+        if request.headers.get('Accept') == 'application/json':
+            return jsonify({'success': True, 'email': email, 'message': 'Login successful'})
+        
         return flask_redirect('/')
     else:
+        if request.headers.get('Accept') == 'application/json':
+            return jsonify({'error': 'Invalid email or password'}), 401
+        
         return flask_redirect('/?error=Invalid email or password')
 
 @app.route('/logout')
@@ -357,20 +386,22 @@ def logout():
 
 @app.route('/api/my-ips')
 def get_ips():
-    if not session.get('logged_in'):
+    email = get_user_email()
+    
+    if not email:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    email = session.get('email')
     if email in USER_IPS:
         return jsonify({'ips': USER_IPS[email]})
     return jsonify({'ips': []})
 
 @app.route('/api/rdns/<ip>')
 def get_rdns(ip):
-    if not session.get('logged_in'):
+    email = get_user_email()
+    
+    if not email:
         return jsonify({'error': 'Unauthorized'}), 401
     
-    email = session.get('email')
     if email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -382,10 +413,11 @@ def get_rdns(ip):
 
 @app.route('/api/rdns/<ip>', methods=['PUT'])
 def update_rdns(ip):
-    if not session.get('logged_in'):
-        return jsonify({'error': 'Unauthorized'}), 401
+    email = get_user_email()
     
-    email = session.get('email')
+    if not email:
+        return jsonify({'error': 'Unauthorized. Please login or provide X-API-Key header'}), 401
+    
     if email not in USER_IPS:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -399,10 +431,9 @@ def update_rdns(ip):
         new_ptr = new_ptr[:-1]
     
     # Check which account this IP belongs to
-    account_number = IP_TO_ACCOUNT.get(ip, '1')  # Default to Account 1
+    account_number = IP_TO_ACCOUNT.get(ip, '1')
     
     if account_number == '1':
-        # Use Account 1 credentials
         client = Client(
             endpoint=OVH_ENDPOINT,
             application_key=OVH_APP_KEY,
@@ -410,7 +441,6 @@ def update_rdns(ip):
             consumer_key=OVH_CONSUMER_KEY,
         )
     elif account_number == '2':
-        # Use Account 2 credentials
         endpoint = os.environ.get('OVH_ACCOUNT_2_ENDPOINT', OVH_ENDPOINT)
         client = Client(
             endpoint=endpoint,
@@ -419,7 +449,6 @@ def update_rdns(ip):
             consumer_key=os.environ.get('OVH_ACCOUNT_2_CONSUMER_KEY'),
         )
     elif account_number == '3':
-        # Use Account 3 credentials
         endpoint = os.environ.get('OVH_ACCOUNT_3_ENDPOINT', OVH_ENDPOINT)
         client = Client(
             endpoint=endpoint,
@@ -428,7 +457,6 @@ def update_rdns(ip):
             consumer_key=os.environ.get('OVH_ACCOUNT_3_CONSUMER_KEY'),
         )
     elif account_number == '4':
-        # Use Account 4 credentials
         endpoint = os.environ.get('OVH_ACCOUNT_4_ENDPOINT', OVH_ENDPOINT)
         client = Client(
             endpoint=endpoint,
@@ -441,7 +469,7 @@ def update_rdns(ip):
     
     try:
         client.post(f'/ip/{ip}/reverse', ipReverse=ip, reverse=new_ptr)
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': 'rDNS updated successfully'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
